@@ -24,3 +24,9 @@
  .nca-panel .nca-summary-table,.nca-panel .nca-regression-table{min-width:0}
  .nca-summary-table th,.nca-summary-table td,.nca-regression-table th,.nca-regression-table td{padding:10px 9px}
 }
+
+/* Match header alignment to the data below: labels left, numerical values right. */
+.nca-results-table-wrap .nca-table thead th:first-child,
+.nca-results-table-wrap .nca-table tbody th{text-align:left}
+.nca-results-table-wrap .nca-table thead th:not(:first-child),
+.nca-results-table-wrap .nca-table tbody td{text-align:right}
