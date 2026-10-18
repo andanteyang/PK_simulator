@@ -1,6 +1,8 @@
 import {defaults,validate,derive,simulate,results,csv,concentration,doseTimes} from './pk-model.js';
+import {createSamplingMode} from './nca-ui.js';
 const $=id=>document.getElementById(id);
 let p={...defaults},rows=[],stats,log=false,geometry,timer;
+const sampling=createSamplingMode(()=>{clearTimeout(timer);update();});
 const definitions={
  dose:['Dose','mg/kg',0,0.1,0,30],cl:['Clearance · CL','L/h/kg',0.000001,0.01,0.01,1],
  v:['Volume · V','L/kg',0.000001,0.1,0.1,5],vc:['Central volume · Vc','L/kg',0.000001,0.1],vp:['Peripheral volume · Vp','L/kg',0.000001,0.1],q:['Intercompartmental CL · Q','L/h/kg',0.000001,0.01],
@@ -35,6 +37,7 @@ function update(){
  $('model-summary').textContent=`${p.model==='one'?'One':'Two'}-compartment · ${p.route==='iv'?'IV bolus':'Oral absorption'} · ${p.dosing==='single'?'Single dose':`${p.n} doses every ${p.tau} h`}`;
  if(errors.length){rows=[];stats=null;$('results').innerHTML='<p>Correct the configuration to calculate results.</p>';$('derived').innerHTML='';}
  $('plot-note').textContent=errors.length?'Invalid configuration':log?'Log scale · Zero concentrations omitted':'Analytical model · Adaptive time grid';
+ sampling.refresh(p,stats);
  draw();
 }
 $('controls').addEventListener('input',e=>{
@@ -43,6 +46,7 @@ $('controls').addEventListener('input',e=>{
  p[key]=e.target.value===''?NaN:Number(e.target.value);
  if(e.target.dataset.for)$(key).value=e.target.value;else{const slider=document.querySelector(`[data-for="${key}"]`);if(slider)slider.value=e.target.value;}
  for(const id of ['export-csv','export-png'])$(id).disabled=true;
+ sampling.suspend();
  clearTimeout(timer);timer=setTimeout(update,90);
 });
 $('reset').onclick=()=>{clearTimeout(timer);p={...defaults};renderFields();update();};
@@ -51,8 +55,8 @@ function draw(){
  const canvas=$('chart'),rect=canvas.getBoundingClientRect(),w=rect.width,h=rect.height,dpr=devicePixelRatio||1;
  canvas.width=w*dpr;canvas.height=h*dpr;const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);
  const left=69,right=w-22,top=27,bottom=h-48,pw=right-left,ph=bottom-top;
- const values=rows.map(r=>r.c).filter(c=>c>0),max=values.reduce((a,b)=>Math.max(a,b),0)||1;
- let ymin=0,ymax=max*1.13;
+ const values=[...rows.map(r=>r.c),...sampling.axisValues()].filter(c=>c>0),max=values.reduce((a,b)=>Math.max(a,b),0)||1;
+ let ymin=0,ymax=Number.isFinite(max*1.13)?max*1.13:max;
  if(log){ymax=Math.ceil(Math.log10(max))+0.15;ymin=Math.floor(Math.log10(values.reduce((a,b)=>Math.min(a,b),max)));if(ymax-ymin<1)ymin=ymax-1;}
  const x=t=>left+t/p.end*pw,y=c=>bottom-((log?Math.log10(c):c)-ymin)/(ymax-ymin)*ph;
  geometry={left,right,top,bottom,x,y,w,h};
@@ -70,18 +74,21 @@ function draw(){
  ctx.strokeStyle='#16836f';ctx.lineWidth=2;ctx.lineJoin='round';ctx.beginPath();let active=false;
  for(const r of rows){if(log&&r.c<=0){active=false;continue;}if(active)ctx.lineTo(x(r.t),y(r.c));else{ctx.moveTo(x(r.t),y(r.c));active=true;}}
  ctx.stroke();ctx.restore();
+ sampling.draw(ctx,geometry,log);
 }
 $('chart').addEventListener('pointermove',e=>{
  if(!rows.length||!geometry)return;const rect=$('chart').getBoundingClientRect(),mx=e.clientX-rect.left,my=e.clientY-rect.top,g=geometry;
+ const sampleTip=sampling.tooltip(mx,my,g,log);
+ if(sampleTip){const tip=$('tooltip');tip.classList.add('nca-tooltip');tip.textContent=sampleTip;tip.hidden=false;tip.style.left=`${Math.max(0,Math.min(mx+12,g.w-tip.offsetWidth-5))}px`;tip.style.top=`${Math.max(0,my-48)}px`;return;}
  if(mx<g.left||mx>g.right||my<g.top||my>g.bottom){$('tooltip').hidden=true;return;}
  let t=(mx-g.left)/(g.right-g.left)*p.end,state='post';
  const near=doseTimes(p).find(td=>Math.abs(g.x(td)-mx)<5);
  if(near!==undefined){t=near;if(p.route==='iv'){const pre=concentration(p,t,'pre'),post=concentration(p,t);if(pre>0||!log)state=Math.abs(g.y(pre)-my)<Math.abs(g.y(post)-my)?'pre':'post';}}
- const c=concentration(p,t,state),tip=$('tooltip');tip.textContent=`${fmt(t)} h · ${fmt(c)} ng/mL${near!==undefined?` · ${state}-dose`:''}`;tip.hidden=false;tip.style.left=`${Math.max(0,Math.min(mx+12,g.w-tip.offsetWidth-5))}px`;tip.style.top=`${Math.max(0,my-48)}px`;
+ const c=concentration(p,t,state),tip=$('tooltip');tip.classList.remove('nca-tooltip');tip.textContent=`${fmt(t)} h · ${fmt(c)} ng/mL${near!==undefined?` · ${state}-dose`:''}`;tip.hidden=false;tip.style.left=`${Math.max(0,Math.min(mx+12,g.w-tip.offsetWidth-5))}px`;tip.style.top=`${Math.max(0,my-48)}px`;
 });
 $('chart').addEventListener('pointerleave',()=>$('tooltip').hidden=true);
 function download(url,name){const a=document.createElement('a');a.href=url;a.download=name;a.click();}
 $('export-csv').onclick=()=>{const url=URL.createObjectURL(new Blob([csv(p,rows)],{type:'text/csv;charset=utf-8'}));download(url,'pk-simulation.csv');setTimeout(()=>URL.revokeObjectURL(url),1000);};
-$('export-png').onclick=()=>{draw();const source=$('chart'),canvas=document.createElement('canvas');canvas.width=source.width;canvas.height=source.height+100*(devicePixelRatio||1);const ctx=canvas.getContext('2d'),dpr=devicePixelRatio||1;ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(source,0,60*dpr);ctx.scale(dpr,dpr);ctx.fillStyle='#234d43';ctx.font='bold 16px sans-serif';ctx.fillText('PK Simulator · Concentration over time',22,25);ctx.font='11px sans-serif';ctx.fillText($('model-summary').textContent+` · ${log?'Log':'Linear'} scale`,22,45);ctx.fillStyle='#748d80';ctx.fillText('Simulation and education only · Dose '+p.dose+' mg/kg · CL '+p.cl+' L/h/kg',22,canvas.height/dpr-14);download(canvas.toDataURL('image/png'),'pk-profile.png');};
+$('export-png').onclick=()=>{draw();const source=$('chart'),canvas=document.createElement('canvas');canvas.width=source.width;canvas.height=source.height+100*(devicePixelRatio||1);const ctx=canvas.getContext('2d'),dpr=devicePixelRatio||1;ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(source,0,60*dpr);ctx.scale(dpr,dpr);ctx.fillStyle='#234d43';ctx.font='bold 16px sans-serif';ctx.fillText('PK Simulator · Concentration over time',22,25);ctx.font='11px sans-serif';ctx.fillText($('model-summary').textContent+` · ${log?'Log':'Linear'} scale`,22,45);ctx.fillStyle='#748d80';if(sampling.caption()){ctx.font='9px sans-serif';ctx.fillText(sampling.caption(),22,canvas.height/dpr-29);ctx.font='11px sans-serif';}ctx.fillText('Simulation and education only · Dose '+p.dose+' mg/kg · CL '+p.cl+' L/h/kg',22,canvas.height/dpr-14);download(canvas.toDataURL('image/png'),'pk-profile.png');};
 new ResizeObserver(draw).observe($('chart-wrap'));
 renderFields();update();
