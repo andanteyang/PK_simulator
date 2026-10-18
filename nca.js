@@ -59,12 +59,42 @@ export function analyzeNCA(input,{route='iv',method='auto',selected=[],blqPolicy
  if(new Set(data.map(p=>p.t)).size!==data.length||data.some(p=>!Number.isFinite(p.t)||p.t<0||!['BLQ','Quantifiable'].includes(p.status)||!['pre','post','sample'].includes(p.event)||p.event==='pre'&&(p.t!==0||route!=='iv')||p.status==='BLQ'&&p.c!==null||p.status==='Quantifiable'&&(!Number.isFinite(p.c)||p.c<=0)))throw Error('NCA requires unique valid reported samples; BLQ concentrations must be null.');
  const exposure=data.filter(p=>p.event!=='pre'),quant=exposure.filter(p=>p.status==='Quantifiable');
  const reasons={},warnings=[];
- const out={cmax:null,tmax:null,aucLast:null,aucObserved:null,aucInf:null,extrapolated:null,lambda:null,halfLife:null,fit:null,lastTime:null,lastC:null,reasons,warnings,bridges:[],eligibleTimes:[],selectedTimes:[],method,blqPolicy,thresholds:{...thresholds}};
+ const out={cmax:null,tmax:null,aucLast:null,aucObserved:null,aucInf:null,extrapolated:null,lambda:null,halfLife:null,fit:null,lastTime:null,lastC:null,c0:null,c0Method:null,aucBack:null,aucBackPct:null,reasons,warnings,bridges:[],eligibleTimes:[],selectedTimes:[],method,blqPolicy,thresholds:{...thresholds}};
  if(!quant.length){for(const key of ['cmax','tmax','aucLast','lambda','halfLife','aucInf','extrapolated'])reasons[key]='No quantifiable post-dose samples.';return out;}
  const maximum=quant.reduce((a,b)=>b.c>a.c?b:a);out.cmax=maximum.c;out.tmax=maximum.t;
  const last=quant.at(-1);out.lastTime=last.t;out.lastC=last.c;
  let curve=quant.map(p=>({t:p.t,c:p.c}));
  const first=quant[0],hasOrigin=first.t===0;
+ // Phoenix-style IV bolus C0: the predose 0 h BLQ is not a postdose 0+ value.
+ // Estimate the dosing-time concentration from the earliest two QUANTIFIABLE
+ // postdose values. Do not substitute the underlying simulator's true C(0+).
+ // Estimated C0 is an integration anchor ONLY: not observed Cmax or lambda-z.
+ if(route==='iv'){
+  if(hasOrigin){
+   out.c0=first.c;
+   out.c0Method='observed-postdose';
+   out.aucBack=0;
+  }else if(quant.length>=2){
+   const second=quant[1];
+   const earlySlope=(Math.log(second.c)-Math.log(first.c))/(second.t-first.t);
+   const estimated=earlySlope<0?Math.exp(Math.log(first.c)-earlySlope*first.t):first.c;
+   if(Number.isFinite(estimated)&&estimated>0){
+    out.c0=estimated;
+    out.c0Method=earlySlope<0?'log-linear-first-two':'fallback-first';
+    curve=[{t:0,c:estimated},...curve];
+    out.aucBack=trapezoid(curve[0],curve[1]);
+    warnings.push(earlySlope<0
+     ? 'IV C0 was back-extrapolated by log-linear regression of the first two quantifiable postdose samples; 0 h predose is excluded.'
+     : 'IV C0 fallback: early concentration slope was not negative, so the first quantifiable postdose concentration was used as C0.');
+    if(exposure.some(p=>p.status==='BLQ'&&p.t>0&&p.t<second.t))
+     warnings.push('An early postdose BLQ precedes or separates the first two quantifiable samples. The C0 estimate should be interpreted cautiously.');
+   }else{
+    reasons.c0='IV C0 back-extrapolation was outside numerical range.';
+   }
+  }else{
+   reasons.c0='At least two quantifiable IV postdose points are needed to estimate C0 when 0+ is not observed.';
+  }
+ }
  if(route==='po'&&!hasOrigin){
   const leading=exposure.filter(p=>p.status==='BLQ'&&p.t<first.t);
   curve=[{t:0,c:0},...leading.filter(p=>p.t>0).map(p=>({t:p.t,c:0})),...curve];
@@ -78,7 +108,7 @@ export function analyzeNCA(input,{route='iv',method='auto',selected=[],blqPolicy
  let area=0;for(let i=1;i<curve.length;i++)area+=trapezoid(curve[i-1],curve[i]);
  if(middle.length){warnings.push(`${blqPolicy==='bridge'?'Explicit bridging enabled':'Integration blocked'}: intermediate BLQ at ${middle.map(p=>p.t).join(', ')} h; quantifiable brackets ${out.bridges.map(b=>`${b.from}–${b.to} h`).join('; ')}. ${blqPolicy==='bridge'?'These intervals are integrated directly between quantifiable endpoints, ignoring BLQ values.':'No AUC is reported across these gaps.'}`);}
  if(middle.length&&blqPolicy==='gap')reasons.aucLast='Intermediate BLQ interrupts integration. Explicitly enable bridging to integrate across quantified endpoints.';
- else if(route==='iv'&&!hasOrigin){out.aucObserved=area;reasons.aucLast='No quantifiable IV 0 h postdose sample: AUC0-last cannot be inferred. Predose is excluded; theoretical C0 is never substituted.';}
+ else if(route==='iv'&&!hasOrigin&&out.c0===null){out.aucObserved=area;reasons.aucLast=reasons.c0||'Unable to determine IV C0 from reported data; AUC0-last is unavailable.';}
  else if(!Number.isFinite(area))reasons.aucLast='AUC exceeds numerical range.';
  else out.aucLast=area;
  const trailing=exposure.filter(p=>p.t>last.t&&p.status==='BLQ');
@@ -109,7 +139,7 @@ export function analyzeNCA(input,{route='iv',method='auto',selected=[],blqPolicy
  else{
   const tail=last.c/out.lambda,total=out.aucLast+tail;
   if(!Number.isFinite(total)||total<=0){reasons.aucInf='AUC extrapolation exceeds numerical range.';reasons.extrapolated=reasons.aucInf;}
-  else{out.aucInf=total;out.extrapolated=tail/total*100;if(out.extrapolated>thresholds.extrapolated)warnings.push(`Diagnostic: AUC extrapolated > ${thresholds.extrapolated}%.`);}
+  else{out.aucInf=total;out.extrapolated=tail/total*100;if(route==='iv'&&out.aucBack!==null)out.aucBackPct=100*out.aucBack/total;if(out.extrapolated>thresholds.extrapolated)warnings.push(`Diagnostic: AUC extrapolated > ${thresholds.extrapolated}%.`);}
  }
  warnings.push('Exploratory diagnostics only; a high R² does not establish a reliable terminal phase. Thresholds are not universal regulatory acceptance criteria.');
  return out;
@@ -119,7 +149,7 @@ export function compareNCA(nca,theory,route){
  return [['Cmax','cmax',theory.global.c,'ng/mL'],['Tmax','tmax',theory.global.t,'h'],['AUC0-inf','aucInf',theory.theoreticalAUC,'ng·h/mL'],[route==='po'?'Apparent terminal half-life (PO benchmark)':'Disposition terminal half-life','halfLife',bench,'h']].map(([label,key,value,unit])=>({label,key,unit,theory:value,nca:nca[key],bias:Number.isFinite(value)&&value!==0&&Number.isFinite(nca[key])?100*(nca[key]-value)/value:null,reason:nca.reasons[key]||''}));
 }
 export function ncaCSV(samples,nca,comparison,metadata={}){
- const result={observed_cmax_ng_ml:nca.cmax,observed_tmax_h:nca.tmax,auc0_last_ng_h_ml:nca.aucLast,auc_first_last_ng_h_ml:nca.aucObserved,lambda_z_per_h:nca.lambda,terminal_half_life_h:nca.halfLife,auc0_inf_ng_h_ml:nca.aucInf,auc_extrapolated_pct:nca.extrapolated,lambda_z_times_h:nca.selectedTimes.join(';'),lambda_z_n:nca.fit?.n??null,r_squared:nca.fit?.r2??null,adjusted_r_squared:nca.fit?.adjustedR2??null,terminal_span_half_lives:nca.fit?.span??null,reasons:JSON.stringify(nca.reasons),warnings:nca.warnings.join(' | '),comparison:JSON.stringify(comparison),integration_brackets:JSON.stringify(nca.bridges),...metadata};
+ const result={iv_c0_ng_ml:nca.c0,iv_c0_method:nca.c0Method,iv_auc_back_extrapolated_ng_h_ml:nca.aucBack,iv_auc_back_extrapolated_percent:nca.aucBackPct,observed_cmax_ng_ml:nca.cmax,observed_tmax_h:nca.tmax,auc0_last_ng_h_ml:nca.aucLast,auc_first_last_ng_h_ml:nca.aucObserved,lambda_z_per_h:nca.lambda,terminal_half_life_h:nca.halfLife,auc0_inf_ng_h_ml:nca.aucInf,auc_extrapolated_pct:nca.extrapolated,lambda_z_times_h:nca.selectedTimes.join(';'),lambda_z_n:nca.fit?.n??null,r_squared:nca.fit?.r2??null,adjusted_r_squared:nca.fit?.adjustedR2??null,terminal_span_half_lives:nca.fit?.span??null,reasons:JSON.stringify(nca.reasons),warnings:nca.warnings.join(' | '),comparison:JSON.stringify(comparison),integration_brackets:JSON.stringify(nca.bridges),...metadata};
  const header=['Sampling time (h)','Underlying theoretical concentration (ng/mL)','Reported concentration (ng/mL) or BLQ','Quantitation status','Event state','Terminal regression selection',...Object.keys(result)];
  const quote=v=>`"${String(v??'N/A').replaceAll('"','""')}"`;
  return [header,...samples.map(s=>[s.t,s.trueC,s.status==='BLQ'?'BLQ':s.c,s.status,s.event,nca.selectedTimes.includes(s.t)?'selected':'not selected',...Object.values(result)])].map(row=>row.map(quote).join(',')).join('\r\n');
