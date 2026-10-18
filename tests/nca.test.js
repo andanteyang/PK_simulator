@@ -59,12 +59,36 @@ test('manual selection uses only chosen eligible times and rejects BLQ/gap/too f
  assert.match(regress([record(0,10),record(1,20),record(2,30)]).reason,/negative slope/);
  assert.match(regress([record(0,10),record(1,10),record(2,10)]).reason,/negative slope/);
 });
-test('IV predose is distinct from postdose, never inferred or integrated as an IV rise',()=>{
- const samples=sampleProfile(p,[0,2,4,8],1);assert.equal(samples[0].event,'pre');assert.equal(samples[0].c,null);assert.equal(samples[0].trueC,0);
- const nca=analyzeNCA(reportedSamples(samples));assert.equal(nca.aucLast,null);assert.equal(nca.aucInf,null);assert.match(nca.reasons.aucLast,/No quantifiable IV 0 h postdose/);
- assert.equal(nca.cmax,single(p,2));assert.ok(nca.aucObserved>0);
- const post=sampleProfile(p,[0,2,4,8],1,'post');assert.equal(post[0].c,10000);assert.equal(post[0].event,'post');
- const noZero=run(p,[2,4,8]).nca;assert.equal(noZero.aucLast,null);
+test('IV predose BLQ permits Phoenix-style back extrapolation to C0 and complete AUC',()=>{
+ const times=[0,1,2,4,8,12,24];
+ const samples=sampleProfile(p,times,1);
+ assert.equal(samples[0].event,'pre');assert.equal(samples[0].c,null);
+ const nca=analyzeNCA(reportedSamples(samples));
+ close(nca.c0,10000);
+ assert.equal(nca.c0Method,'log-linear-first-two');
+ close(nca.aucBack,100000*(1-Math.exp(-0.1)));
+ close(nca.aucLast,100000*(1-Math.exp(-2.4)));
+ close(nca.aucInf,100000);
+ close(nca.aucBackPct,nca.aucBack/nca.aucInf*100);
+ close(nca.cmax,single(p,1));close(nca.tmax,1);
+ assert.ok(!nca.selectedTimes.includes(0),'synthetic C0 must not enter lambda-z');
+ const withoutTimeZero=run(p,[1,2,4,8,12,24]).nca;
+ close(withoutTimeZero.aucLast,nca.aucLast);
+ const post=analyzeNCA(reportedSamples(sampleProfile(p,times,1,'post')));
+ assert.equal(post.c0Method,'observed-postdose');close(post.c0,10000);
+ close(post.aucBack,0);close(post.aucLast,nca.aucLast);
+});
+test('IV C0 fallback uses first quantifiable value when early slope is nonnegative',()=>{
+ const data=[{t:0,c:null,status:'BLQ',event:'pre'},record(1,10),record(2,11),record(3,8),record(4,6)];
+ const nca=analyzeNCA(data);
+ assert.equal(nca.c0Method,'fallback-first');close(nca.c0,10);
+ close(nca.aucBack,10);assert.ok(nca.aucLast>nca.aucBack);
+});
+test('IV without observed 0+ and only one quantifiable postdose point cannot back-extrapolate C0',()=>{
+ const data=[{t:0,c:null,status:'BLQ',event:'pre'},record(2,10)];
+ const nca=analyzeNCA(data);
+ assert.equal(nca.c0,null);assert.equal(nca.aucLast,null);assert.equal(nca.aucInf,null);
+ assert.match(nca.reasons.c0,/two quantifiable/);
 });
 test('PO leading BLQ has explicit zero rule, trailing BLQ stops AUC',()=>{
  const data=[record(0,null),record(1,null),record(2,50),record(4,30),record(8,10),record(12,3),record(24,null)];
