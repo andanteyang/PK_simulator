@@ -1,6 +1,12 @@
 import {parseTimes,sampleProfile,reportedSamples,analyzeNCA,compareNCA,ncaCSV} from './nca.js';
 const $=id=>document.getElementById(id);
 const fmt=v=>Number.isFinite(v)?new Intl.NumberFormat('en-US',{maximumSignificantDigits:5}).format(v):'N/A';
+// UI-only percentage rounding: all underlying PK/NCA calculations retain full precision.
+export function formatBiasPercent(value){
+ if(!Number.isFinite(value))return 'N/A';
+ const display=Math.abs(value)<0.0005?0:value;
+ return display.toFixed(3)+'%';
+}
 export function createSamplingMode(onChange){
  let state=null,selected=new Set();
  const controls=['nca-enabled','nca-times','nca-lloq','nca-zero','nca-method','nca-blq-policy','nca-r2','nca-span','nca-extrap'];
@@ -36,7 +42,7 @@ export function createSamplingMode(onChange){
  function render(theory,route){
   const {samples,nca,comparison}=state,fit=nca.fit,manual=$('nca-method').value==='manual';
   const value=(key,unit,note='')=>`<span class="nca-result-value">${fmt(nca[key])}</span> <span class="nca-result-unit">${unit}</span>${note?`<small>${note}</small>`:''}${nca[key]===null&&nca.reasons[key]?`<small>N/A: ${nca.reasons[key]}</small>`:''}`;
-  const comparisonRows=comparison.map(c=>`<tr><th scope="row">${c.label}<small>${c.unit}</small></th><td>${fmt(c.nca)}${c.reason?`<small>${c.reason}</small>`:''}</td><td>${fmt(c.theory)}</td><td>${c.bias===null?'N/A':fmt(c.bias)+'%'}${c.bias===null&&c.theory===0?'<small>Theoretical value is zero.</small>':''}</td></tr>`).join('');
+  const comparisonRows=comparison.map(c=>`<tr><th scope="row">${c.label}<small>${c.unit}</small></th><td>${fmt(c.nca)}${c.reason?`<small>${c.reason}</small>`:''}</td><td>${fmt(c.theory)}</td><td>${formatBiasPercent(c.bias)}${c.bias===null&&c.theory===0?'<small>Theoretical value is zero.</small>':''}</td></tr>`).join('');
   const c0Note=nca.c0Method==='log-linear-first-two'?'Estimated from first two postdose samples':nca.c0Method==='fallback-first'?'Estimated using first postdose concentration (fallback)':nca.c0Method==='observed-postdose'?'Observed postdose (0+)':nca.reasons.c0||'Not estimated';
   const summaryMetrics=[
    ...(route==='iv'?[['IV C₀','c0','ng/mL',c0Note],['IV back-extrapolated AUC','aucBack','ng·h/mL'],['IV back-extrapolated AUC / AUCinf','aucBackPct','%']]:[]),
