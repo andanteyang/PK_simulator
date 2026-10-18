@@ -32,17 +32,36 @@ export function createSamplingMode(onChange){
   }catch(e){$('nca-error').hidden=false;$('nca-error').textContent=e.message;$('nca-content').replaceChildren();}
  }
  function readNumber(id){return $(id).value.trim()===''?NaN:Number($(id).value);}
+
  function render(theory,route){
   const {samples,nca,comparison}=state,fit=nca.fit,manual=$('nca-method').value==='manual';
-  const value=(key,unit)=>`<strong>${fmt(nca[key])}</strong> ${unit}${nca[key]===null?`<small>N/A: ${nca.reasons[key]}</small>`:''}`;
+  const value=(key,unit,note='')=>`<span class="nca-result-value">${fmt(nca[key])}</span> <span class="nca-result-unit">${unit}</span>${note?`<small>${note}</small>`:''}${nca[key]===null&&nca.reasons[key]?`<small>N/A: ${nca.reasons[key]}</small>`:''}`;
   const comparisonRows=comparison.map(c=>`<tr><th scope="row">${c.label}<small>${c.unit}</small></th><td>${fmt(c.nca)}${c.reason?`<small>${c.reason}</small>`:''}</td><td>${fmt(c.theory)}</td><td>${c.bias===null?'N/A':fmt(c.bias)+'%'}${c.bias===null&&c.theory===0?'<small>Theoretical value is zero.</small>':''}</td></tr>`).join('');
+  const c0Note=nca.c0Method==='log-linear-first-two'?'Estimated from first two postdose samples':nca.c0Method==='fallback-first'?'Estimated using first postdose concentration (fallback)':nca.c0Method==='observed-postdose'?'Observed postdose (0+)':nca.reasons.c0||'Not estimated';
+  const summaryMetrics=[
+   ...(route==='iv'?[['IV C₀','c0','ng/mL',c0Note],['IV back-extrapolated AUC','aucBack','ng·h/mL'],['IV back-extrapolated AUC / AUCinf','aucBackPct','%']]:[]),
+   ['AUC₀–last','aucLast','ng·h/mL'],
+   ['λz','lambda','h⁻¹'],
+   ['AUC extrapolated','extrapolated','%']
+  ];
+  const summaryRows=summaryMetrics.map(([label,key,unit,note])=>`<tr><th scope="row">${label}</th><td>${value(key,unit,note)}</td></tr>`).join('');
+  const poRow=route==='po'?`<tr><th scope="row">Disposition half-life (model)</th><td><span class="nca-result-value">${fmt(theory.halfLife)}</span> <span class="nca-result-unit">h</span><small>Apparent PO terminal benchmark: ${fmt(theory.apparentHalfLife)} h${theory.apparentHalfLife>theory.halfLife?' · absorption-limited (flip-flop)':''}</small></td></tr>`:'';
+  const partialRow=nca.aucObserved!==null&&nca.aucLast===null?`<tr><th scope="row">Partial AUCfirst–last</th><td><span class="nca-result-value">${fmt(nca.aucObserved)}</span> <span class="nca-result-unit">ng·h/mL</span><small>Excludes the initial IV interval; not AUC₀–last.</small></td></tr>`:'';
+  const regressionRows=[
+   ['λz points',fit?fit.times.map(fmt).join(', ')+' h':'N/A'],
+   ['Number of points',fit?.n??'N/A'],
+   ['R²',fmt(fit?.r2)],
+   ['Adjusted R²',fmt(fit?.adjustedR2)],
+   ['Terminal span',fit?fmt(fit.span)+' half-lives':'N/A']
+  ].map(([label,reading])=>`<tr><th scope="row">${label}</th><td>${reading}</td></tr>`).join('');
   const bias=comparison.find(c=>c.key==='halfLife')?.bias;
-  const modelWarning=bias!==null&&bias!==undefined&&Math.abs(bias)>20?'<p class="nca-warning">Model comparison: estimated terminal half-life differs from its observable asymptotic benchmark by more than 20%. This sampling window may not cover the terminal phase, even when R² is high.</p>':'';
-  $('nca-content').innerHTML=`<div class="nca-table-wrap"><table class="nca-table"><caption>NCA estimates versus full single-dose model benchmarks</caption><thead><tr><th>Parameter</th><th>NCA estimate</th><th>Theoretical model</th><th>Relative bias</th></tr></thead><tbody>${comparisonRows}</tbody></table></div>${route==='po'?`<p class="field-note">Disposition half-life: ${fmt(theory.halfLife)} h. Apparent PO terminal benchmark: ${fmt(theory.apparentHalfLife)} h${theory.apparentHalfLife>theory.halfLife?' · absorption-limited (flip-flop)':''}.</p>`:''}
-  <div class="nca-metrics">${route==='iv'?`<div>IV C₀ ${value('c0','ng/mL')}<small>${nca.c0Method==='log-linear-first-two'?'Estimated from first two postdose samples':nca.c0Method==='fallback-first'?'Estimated using first postdose concentration (fallback)':nca.c0Method==='observed-postdose'?'Observed postdose (0+)':nca.reasons.c0||'Not estimated'}</small></div><div>IV back-extrapolated AUC ${value('aucBack','ng·h/mL')}</div><div>IV AUC back-extrapolated ${value('aucBackPct','% of AUCinf')}</div>`:''}<div>AUC0-last ${value('aucLast','ng·h/mL')}</div><div>λz ${value('lambda','h⁻¹')}</div><div>AUC extrapolated ${value('extrapolated','%')}</div></div>
-  ${nca.aucObserved!==null&&nca.aucLast===null?`<p class="nca-warning">Partial AUCfirst-last = ${fmt(nca.aucObserved)} ng·h/mL. This excludes the unsampled IV interval from 0 h; it is not AUC0-last.</p>`:''}
-  <div class="nca-fit-stats"><span>λz points: ${fit?fit.times.map(fmt).join(', ')+' h':'N/A'}</span><span>Number of points: ${fit?.n??'N/A'}</span><span>R²: ${fmt(fit?.r2)}</span><span>Adjusted R²: ${fmt(fit?.adjustedR2)}</span><span>Terminal span: ${fmt(fit?.span)} half-lives</span></div>
-  <div class="nca-warnings">${nca.warnings.map(w=>`<p>${w}</p>`).join('')}</div>${modelWarning}
+  const modelWarning=bias!==null&&bias!==undefined&&Math.abs(bias)>20?'Model comparison: estimated terminal half-life differs from its observable asymptotic benchmark by more than 20%. This sampling window may not cover the terminal phase, even when R² is high.':null;
+  const notes=[...nca.warnings,...(modelWarning?[modelWarning]:[])];
+  $('nca-content').innerHTML=`
+  <div class="nca-table-wrap nca-results-table-wrap"><table class="nca-table nca-comparison-table"><caption>NCA estimates versus full single-dose model benchmarks</caption><thead><tr><th>Parameter</th><th>NCA estimate</th><th>Theoretical model</th><th>Relative bias</th></tr></thead><tbody>${comparisonRows}</tbody></table></div>
+  <div class="nca-table-wrap nca-results-table-wrap"><table class="nca-table nca-summary-table"><caption>Additional NCA estimates</caption><thead><tr><th>Parameter</th><th>NCA estimate</th></tr></thead><tbody>${summaryRows}${poRow}${partialRow}</tbody></table></div>
+  <div class="nca-table-wrap nca-results-table-wrap"><table class="nca-table nca-regression-table"><caption>Terminal regression diagnostics</caption><thead><tr><th>Diagnostic</th><th>Result</th></tr></thead><tbody>${regressionRows}</tbody></table></div>
+  ${notes.length?`<section class="nca-note-group"><h3>NCA interpretation & diagnostic notes</h3>${notes.map(w=>`<p class="nca-warning">${w}</p>`).join('')}</section>`:''}
   <div class="nca-table-wrap"><table class="nca-table" id="nca-samples"><caption>Reported samples · ${manual?'Select eligible rows for manual regression':'Automatic terminal selection'} · BLQ values are never assigned LLOQ</caption><thead><tr><th>λz selection</th><th>Time (h)</th><th>Reported (ng/mL)</th><th>State</th></tr></thead><tbody>${samples.map(s=>`<tr class="${nca.selectedTimes.includes(s.t)?'nca-selected':''}"><td>${manual?`<input type="checkbox" aria-label="Use ${s.t} h in terminal regression" data-nca-time="${s.t}" ${selected.has(s.t)?'checked':''} ${!nca.eligibleTimes.includes(s.t)&&!selected.has(s.t)?'disabled':''}>`:nca.selectedTimes.includes(s.t)?'Selected':'—'}</td><td>${s.t}</td><td>${s.status==='BLQ'?'<span class="nca-blq">BLQ</span>':fmt(s.c)}</td><td>${s.event==='pre'?'0 h predose · excluded':s.event==='post'?'0 h postdose (0+)':s.status}</td></tr>`).join('')}</tbody></table></div>`;
  }
  function axisValues(){return state?[state.lloq,...state.samples.filter(s=>s.c!==null).map(s=>s.c)]:[];}
